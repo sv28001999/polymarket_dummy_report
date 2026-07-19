@@ -184,7 +184,7 @@ const recordHourlyTrades = async (clobIds) => {
                     records = [];
                 }
             }
-            records.push({ price, epoch: currentHourlyEventEpoch });
+            records.push({ high: highPrice, low: lowPrice, epoch: currentHourlyEventEpoch });
             fs.writeFileSync(HOURLY_REPORT_FILE, JSON.stringify(records, null, 2));
 
             if (hourlyLogicInterval) {
