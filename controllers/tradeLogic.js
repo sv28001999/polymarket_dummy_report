@@ -6,19 +6,33 @@ const fs = require('fs');
 const path = require('path');
 
 const REPORT_FILE = path.join(__dirname, '..', 'report.json');
+const HOURLY_REPORT_FILE = path.join(__dirname, '..', 'hourlyReport.json');
 const URL = 'https://gamma-api.polymarket.com/markets/slug/btc-updown-15m-';
 const GAMMA_API_BASE = 'https://gamma-api.polymarket.com/markets/slug/btc-updown-5m-';
+const GAMMA_API_SLUG_BASE = 'https://gamma-api.polymarket.com/markets/slug/';
 const SERVER_BASE_URL = 'https://polymarket-server-sits.onrender.com';
+const PRICE_URL = 'https://clob.polymarket.com/last-trade-price?token_id=';
 
 const HOST = "https://clob.polymarket.com";
 const CHAIN_ID = 137; // Polygon mainnet
 
 const FIVE_MIN_SECONDS = 5 * 60;
+const HOUR_SECONDS = 60 * 60;
 let schedulerRunning = false;
 let schedulerTimeout = null;
 let schedulerInterval = null;
 let logicInterval = null;
 let currentEventEpoch = 0;
+let currentPrice = 0;
+let highPrice = 0;
+let lowPrice = 0;
+let isInitial = true;
+
+let hourlySchedulerRunning = false;
+let hourlySchedulerTimeout = null;
+let hourlySchedulerInterval = null;
+let hourlyLogicInterval = null;
+let currentHourlyEventEpoch = 0;
 
 function mapToUpDown(clobTokenIds) {
     try {
@@ -109,6 +123,203 @@ const startLogic = async () => {
             console.error('[recordTrades] Unhandled error:', err.message);
         });
     }, 1500);
+};
+
+const getCurrentHourlyEventEpoch = async () => {
+    const currentEpoch = (await axios.get('https://clob.polymarket.com/time')).data;
+    const timestampMs = currentEpoch < 10000000000 ? currentEpoch * 1000 : currentEpoch;
+    const oneHour = 60 * 60 * 1000;
+    const nextInterval = Math.ceil(timestampMs / oneHour) * oneHour;
+    const epoch = currentEpoch < 10000000000
+        ? Math.floor(nextInterval / 1000) - 3600
+        : nextInterval - 3600;
+    return epoch;
+};
+
+// Builds a slug like `bitcoin-up-or-down-july-19-2026-1am-et` from an epoch (seconds) in US Eastern time.
+const buildHourlySlug = (epochSeconds) => {
+    const date = new Date(epochSeconds * 1000);
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        month: 'long',
+        day: 'numeric',
+        year: 'numeric',
+        hour: 'numeric',
+        hour12: true,
+    }).formatToParts(date);
+
+    const get = (type) => parts.find((p) => p.type === type)?.value;
+    const month = get('month').toLowerCase();
+    const day = get('day');
+    const year = get('year');
+    const hour = get('hour');
+    const period = get('dayPeriod').toLowerCase();
+
+    return `bitcoin-up-or-down-${month}-${day}-${year}-${hour}${period}-et`;
+};
+
+const recordHourlyTrades = async (clobIds) => {
+    try {
+        const priceRes = await axios.get(`${PRICE_URL}${clobIds.UP}`);
+        currentPrice = Math.round(priceRes.data.price * 100);
+        if (isInitial) {
+            highPrice = currentPrice;
+            lowPrice = currentPrice;
+            isInitial = false;
+        }
+        else {
+            highPrice = currentPrice > highPrice ? currentPrice : highPrice;
+            lowPrice = currentPrice < lowPrice ? currentPrice : lowPrice;
+            console.log(highPrice);
+            console.log(lowPrice);
+        }
+
+        if (currentPrice == 1 || currentPrice == 99) {
+            let records = [];
+            if (fs.existsSync(HOURLY_REPORT_FILE)) {
+                try {
+                    records = JSON.parse(fs.readFileSync(HOURLY_REPORT_FILE, 'utf-8'));
+                    if (!Array.isArray(records)) records = [];
+                } catch (parseErr) {
+                    records = [];
+                }
+            }
+            records.push({ price, epoch: currentHourlyEventEpoch });
+            fs.writeFileSync(HOURLY_REPORT_FILE, JSON.stringify(records, null, 2));
+
+            if (hourlyLogicInterval) {
+                clearInterval(hourlyLogicInterval);
+            }
+        }
+
+    } catch (err) {
+        console.error(`[recordHourlyTrades] Epoch ${currentHourlyEventEpoch} failed:`, err.message);
+    }
+};
+
+const startHourlyLogic = async () => {
+    if (hourlyLogicInterval) {
+        clearInterval(hourlyLogicInterval);
+        hourlyLogicInterval = null;
+    }
+
+    highPrice = 0;
+    lowPrice = 0;
+    isInitial = true;
+    currentPrice = 0;
+
+    try {
+        currentHourlyEventEpoch = await getCurrentHourlyEventEpoch();
+        console.log('Current hourly epoch:', currentHourlyEventEpoch);
+    } catch (err) {
+        console.error('[Hourly Startup] Failed to fetch current epoch — connectivity issue:', err.message);
+        return;
+    }
+
+    const slug = buildHourlySlug(currentHourlyEventEpoch);
+    console.log('Hourly slug:', slug);
+
+    let eventDetails;
+    try {
+        eventDetails = await axios.get(`${GAMMA_API_SLUG_BASE}${slug}`);
+    } catch (err) {
+        console.error(`[Hourly Epoch ${currentHourlyEventEpoch}] Failed to fetch event details — connectivity issue:`, err.message);
+        return;
+    }
+
+    const clobId = mapToUpDown(eventDetails.data && eventDetails.data.clobTokenIds);
+    if (!clobId) {
+        console.error(`[Hourly Epoch ${currentHourlyEventEpoch}] Missing or invalid clobTokenIds — skipping this cycle`);
+        return;
+    }
+
+    console.log('Hourly Started', new Date().toISOString());
+    hourlyLogicInterval = setInterval(() => {
+        recordHourlyTrades(clobId).catch((err) => {
+            console.error('[recordHourlyTrades] Unhandled error:', err.message);
+        });
+    }, 1500);
+};
+
+const startHourlyScheduler = async (req, res, next) => {
+    try {
+        if (hourlySchedulerRunning) {
+            return res.status(200).json({
+                success: true,
+                message: 'Hourly scheduler already running'
+            });
+        }
+
+        const epoch = await fetchServerEpoch();
+        if (!Number.isFinite(epoch)) {
+            throw new Error(`Invalid server epoch: ${epoch}`);
+        }
+
+        // Seconds remaining until the next 1-hour boundary.
+        const remaining = HOUR_SECONDS - (epoch % HOUR_SECONDS);
+
+        hourlySchedulerRunning = true;
+        console.log(`Server epoch: ${epoch}, waiting ${remaining}s until next 1h boundary`);
+
+        hourlySchedulerTimeout = setTimeout(() => {
+            startHourlyLogic().catch((err) => console.error('[startHourlyLogic] Unhandled error:', err.message));
+            hourlySchedulerInterval = setInterval(() => {
+                startHourlyLogic().catch((err) => console.error('[startHourlyLogic] Unhandled error:', err.message));
+            }, HOUR_SECONDS * 1000);
+        }, (remaining * 1000) + 4000);
+
+        return res.status(200).json({
+            success: true,
+            message: 'Hourly scheduler started',
+            serverEpoch: epoch,
+            waitSeconds: remaining
+        });
+    } catch (error) {
+        console.error('Error starting hourly scheduler:', error.message);
+        return res.status(500).json({
+            success: false,
+            message: 'Failed to start hourly scheduler',
+            error: error.message
+        });
+    }
+};
+
+const stopHourlyScheduler = async (req, res, next) => {
+    try {
+        if (!hourlySchedulerRunning) {
+            return res.status(200).json({
+                success: true,
+                message: 'Hourly scheduler not running'
+            });
+        }
+
+        if (hourlySchedulerTimeout) {
+            clearTimeout(hourlySchedulerTimeout);
+            hourlySchedulerTimeout = null;
+        }
+        if (hourlySchedulerInterval) {
+            clearInterval(hourlySchedulerInterval);
+            hourlySchedulerInterval = null;
+        }
+        if (hourlyLogicInterval) {
+            clearInterval(hourlyLogicInterval);
+            hourlyLogicInterval = null;
+        }
+        hourlySchedulerRunning = false;
+        console.log('Hourly scheduler stopped', new Date().toISOString());
+
+        return res.status(200).json({
+            success: true,
+            message: 'Hourly scheduler stopped'
+        });
+    } catch (error) {
+        console.error('Error stopping hourly scheduler:', error.message);
+        return res.status(500).json({
+            success: false,
+            message: 'Failed to stop hourly scheduler',
+            error: error.message
+        });
+    }
 };
 
 const fetchServerEpoch = async () => {
@@ -222,4 +433,6 @@ module.exports = {
     getServerTime,
     startScheduler,
     stopScheduler,
+    startHourlyScheduler,
+    stopHourlyScheduler,
 }
