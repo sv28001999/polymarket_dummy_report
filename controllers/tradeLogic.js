@@ -27,6 +27,8 @@ let currentPrice = 0;
 let highPrice = 0;
 let lowPrice = 0;
 let isInitial = true;
+let isBuy = false;
+let isUp = true;
 
 let hourlySchedulerRunning = false;
 let hourlySchedulerTimeout = null;
@@ -85,7 +87,19 @@ const recordTrades = async (clobIDs) => {
             } catch (fbErr) {
                 // pushToFirebase already logged the error; keep going so interval still clears below
             }
+            isBuy = true;
+            isUp = price == 1 ? true : false;
+        }
 
+        if (isBuy && isUp && price > 2) {
+            await pushToFirebase('events', { price, epoch: currentEventEpoch, profit: true, side: "UP" });
+            if (logicInterval) {
+                clearInterval(logicInterval);
+            }
+        }
+
+        if (isBuy && !isUp && price < 98) {
+            await pushToFirebase('events', { price, epoch: currentEventEpoch, profit: true, side: "DOWN" });
             if (logicInterval) {
                 clearInterval(logicInterval);
             }
@@ -357,6 +371,8 @@ const startScheduler = async (req, res, next) => {
         schedulerTimeout = setTimeout(() => {
             startLogic().catch((err) => console.error('[startLogic] Unhandled error:', err.message));
             schedulerInterval = setInterval(() => {
+                let isBuy = false;
+                let isUp = true;
                 startLogic().catch((err) => console.error('[startLogic] Unhandled error:', err.message));
             }, FIVE_MIN_SECONDS * 1000);
         }, (remaining * 1000) + 4000);
