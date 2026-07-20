@@ -80,25 +80,25 @@ const recordTrades = async (clobIDs) => {
         const price = Math.round(currentPriceRes.data.price);
         console.log(price);
 
-        if (price == 1 || price == 99) {
+        if ((price == 1 || price == 99) && !isBuy) {
+            isBuy = true;
+            isUp = price == 1 ? true : false;
             try {
                 await pushToFirebase('events', { price, epoch: currentEventEpoch });
                 console.log(`[Firebase] Saved event record for epoch ${currentEventEpoch}`);
             } catch (fbErr) {
                 // pushToFirebase already logged the error; keep going so interval still clears below
             }
-            isBuy = true;
-            isUp = price == 1 ? true : false;
         }
 
-        if (isBuy && isUp && price > 2) {
+        if (isBuy && isUp && (price > 2)) {
             await pushToFirebase('events', { price, epoch: currentEventEpoch, profit: true, side: "UP" });
             if (logicInterval) {
                 clearInterval(logicInterval);
             }
         }
 
-        if (isBuy && !isUp && price < 98) {
+        if (isBuy && !isUp && (price < 98)) {
             await pushToFirebase('events', { price, epoch: currentEventEpoch, profit: true, side: "DOWN" });
             if (logicInterval) {
                 clearInterval(logicInterval);
@@ -115,6 +115,13 @@ const startLogic = async () => {
         clearInterval(logicInterval);
         logicInterval = null;
     }
+
+    // Reset the module-level buy/side state for the new epoch.
+    // IMPORTANT: no `let` here — these must assign to the outer-scope
+    // `isBuy`/`isUp` variables (the ones `recordTrades` actually reads),
+    // not create new shadowed locals that recordTrades never sees.
+    isBuy = false;
+    isUp = true;
 
     try {
         currentEventEpoch = await getCurrentEventEpoch();
@@ -371,8 +378,6 @@ const startScheduler = async (req, res, next) => {
         schedulerTimeout = setTimeout(() => {
             startLogic().catch((err) => console.error('[startLogic] Unhandled error:', err.message));
             schedulerInterval = setInterval(() => {
-                let isBuy = false;
-                let isUp = true;
                 startLogic().catch((err) => console.error('[startLogic] Unhandled error:', err.message));
             }, FIVE_MIN_SECONDS * 1000);
         }, (remaining * 1000) + 4000);
