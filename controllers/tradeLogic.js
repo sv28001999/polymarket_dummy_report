@@ -2,11 +2,11 @@ require('dotenv').config();
 const { ClobClient } = require('@polymarket/clob-client');
 const { ethers } = require('ethers');
 const axios = require('axios');
-const fs = require('fs');
-const path = require('path');
 
-const REPORT_FILE = path.join(__dirname, '..', 'report.json');
-const HOURLY_REPORT_FILE = path.join(__dirname, '..', 'hourlyReport.json');
+const FIREBASE_BASE_URL = 'https://record-app-8c32d-default-rtdb.firebaseio.com';
+// Optional: if your DB rules require auth, set FIREBASE_SECRET in .env and it will be appended automatically.
+const FIREBASE_AUTH_QS = process.env.FIREBASE_SECRET ? `?auth=${process.env.FIREBASE_SECRET}` : '';
+
 const URL = 'https://gamma-api.polymarket.com/markets/slug/btc-updown-15m-';
 const GAMMA_API_BASE = 'https://gamma-api.polymarket.com/markets/slug/btc-updown-5m-';
 const GAMMA_API_SLUG_BASE = 'https://gamma-api.polymarket.com/markets/slug/';
@@ -44,6 +44,18 @@ function mapToUpDown(clobTokenIds) {
     }
 }
 
+// Pushes a record to a Firebase RTDB path using the auto-generated push-key.
+// Equivalent to Firebase's `push()` — POST to a list node creates a new child.
+const pushToFirebase = async (nodePath, record) => {
+    try {
+        const url = `${FIREBASE_BASE_URL}/${nodePath}.json${FIREBASE_AUTH_QS}`;
+        await axios.post(url, record);
+    } catch (err) {
+        console.error(`[Firebase] Failed to write to ${nodePath}:`, err.message);
+        throw err;
+    }
+};
+
 const getCurrentEventEpoch = async () => {
     const currentEpoch = (await axios.get('https://clob.polymarket.com/time')).data;
     const timestampMs = currentEpoch < 10000000000 ? currentEpoch * 1000 : currentEpoch;
@@ -67,17 +79,12 @@ const recordTrades = async (clobIDs) => {
         console.log(price);
 
         if (price == 1 || price == 99) {
-            let records = [];
-            if (fs.existsSync(REPORT_FILE)) {
-                try {
-                    records = JSON.parse(fs.readFileSync(REPORT_FILE, 'utf-8'));
-                    if (!Array.isArray(records)) records = [];
-                } catch (parseErr) {
-                    records = [];
-                }
+            try {
+                await pushToFirebase('events', { price, epoch: currentEventEpoch });
+                console.log(`[Firebase] Saved event record for epoch ${currentEventEpoch}`);
+            } catch (fbErr) {
+                // pushToFirebase already logged the error; keep going so interval still clears below
             }
-            records.push({ price, epoch: currentEventEpoch });
-            fs.writeFileSync(REPORT_FILE, JSON.stringify(records, null, 2));
 
             if (logicInterval) {
                 clearInterval(logicInterval);
@@ -175,17 +182,16 @@ const recordHourlyTrades = async (clobIds) => {
         }
 
         if (currentPrice == 1 || currentPrice == 99) {
-            let records = [];
-            if (fs.existsSync(HOURLY_REPORT_FILE)) {
-                try {
-                    records = JSON.parse(fs.readFileSync(HOURLY_REPORT_FILE, 'utf-8'));
-                    if (!Array.isArray(records)) records = [];
-                } catch (parseErr) {
-                    records = [];
-                }
+            try {
+                await pushToFirebase('hourlyEvents', {
+                    high: highPrice,
+                    low: lowPrice,
+                    epoch: currentHourlyEventEpoch,
+                });
+                console.log(`[Firebase] Saved hourly event record for epoch ${currentHourlyEventEpoch}`);
+            } catch (fbErr) {
+                // pushToFirebase already logged the error
             }
-            records.push({ high: highPrice, low: lowPrice, epoch: currentHourlyEventEpoch });
-            fs.writeFileSync(HOURLY_REPORT_FILE, JSON.stringify(records, null, 2));
 
             if (hourlyLogicInterval) {
                 clearInterval(hourlyLogicInterval);

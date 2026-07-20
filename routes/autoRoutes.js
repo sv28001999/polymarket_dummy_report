@@ -2,26 +2,29 @@ const express = require('express');
 const router = express.Router();
 const fs = require('fs');
 const path = require('path');
+const axios = require('axios');
 
 const { getServerTime, startScheduler, stopScheduler, startHourlyScheduler, stopHourlyScheduler
 } = require('../controllers/tradeLogic');
 
-router.route('/events').get((req, res) => {
-    const filePath = path.join(__dirname, '../report.json');
-    if (!fs.existsSync(filePath)) {
-        return res.status(404).json({ success: false, message: 'No events file found.' });
+router.route('/events').get(async (req, res) => {
+    try {
+        const { data } = await axios.get(`https://record-app-8c32d-default-rtdb.firebaseio.com/events.json`);
+        if (!data) return res.status(404).json({ success: false, message: 'No events found.' });
+        return res.status(200).json({ success: true, data });
+    } catch (err) {
+        return res.status(500).json({ success: false, message: err.message });
     }
-    const data = fs.readFileSync(filePath, 'utf-8');
-    return res.status(200).json({ success: true, data: JSON.parse(data) });
 });
 
-router.route('/hourlyEvents').get((req, res) => {
-    const filePath = path.join(__dirname, '../hourlyReport.json');
-    if (!fs.existsSync(filePath)) {
-        return res.status(404).json({ success: false, message: 'No hourly events file found.' });
+router.route('/hourlyEvents').get(async (req, res) => {
+    try {
+        const { data } = await axios.get(`https://record-app-8c32d-default-rtdb.firebaseio.com/hourlyEvents.json`);
+        if (!data) return res.status(404).json({ success: false, message: 'No events found.' });
+        return res.status(200).json({ success: true, data });
+    } catch (err) {
+        return res.status(500).json({ success: false, message: err.message });
     }
-    const data = fs.readFileSync(filePath, 'utf-8');
-    return res.status(200).json({ success: true, data: JSON.parse(data) });
 });
 
 router.route('/getServerTime').get(getServerTime);
